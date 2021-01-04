@@ -1,0 +1,91 @@
+var image = ee.Image(landsat.filterDate('2016-06-01','2016-08-31').filterBounds(Woodlands).sort('CLOUD_COVER').first());
+
+// Load a table of state boundaries and filter.
+var fc = ee.FeatureCollection('TIGER/2018/Counties')
+    .filter(ee.Filter.eq('NAME', 'Philadelphia'));
+
+print('A Landsat scene',image);
+
+// NDVI Calculation
+var B4_Red = image.select('B4');
+var B5_NIR = image.select('B5');
+var ndvi = image.expression(
+    '(B5-B4)/(B5+B4)', {
+      'B4' : B4_Red,
+      'B5' : B5_NIR
+    });
+var ndvi_palette = 
+    'FFFFFF, CE7E45, DF923D, F1B555, FCD163, 99B718, 74A901, 66A000, 529400,' +
+    '3E8601, 207401, 056201, 004C00, 023B01, 012E01, 011D01, 011301';
+
+// Clip to the output image to the Philadelphia county boundaries.
+var clipped_ndvi = ndvi.clipToCollection(fc);    
+Map.addLayer(clipped_ndvi, {min: -0.1, max: 1.0, palette: ndvi_palette},'ndvi');
+
+print('ndvi',clipped_ndvi);
+
+// Top of Atmosphere Spectral Radiance (TOA)
+var B10_TIRS = image.select('B10');                  // Band 10
+var B10_Ml = image.getNumber('RADIANCE_MULT_BAND_10');  // Band-specific multiplicative rescaling factor
+var B10_Al = image.getNumber('RADIANCE_ADD_BAND_10');   // Band-specific additive rescaling factor
+
+var TOA = image.expression(
+    'Ml*Qcal+Al', {
+      'Ml' : B10_Ml,
+      'Qcal' : B10_TIRS,
+      'Al' : B10_Al
+    });
+
+//print('TOA',TOA);
+
+// Convert TOA to Brightness Temperature (BT)
+var K1 = image.getNumber('K1_CONSTANT_BAND_10'); // Band-specific thermal conversion constant 1
+var K2 = image.getNumber('K2_CONSTANT_BAND_10'); // Band-specific thermal conversion constant 2
+
+var BT = image.expression(
+    'K2/(log(K1/TOA+1))-273.15', {
+      'K2' : K2,
+      'K1' : K1,
+      'TOA' : TOA
+    });
+
+//print('BT',BT);
+
+// Calculate Proportion of Vegetation
+var Pv = image.expression(
+    '((ndvi-0.5)/(0.5-0.2))**2', {
+      'ndvi' : ndvi,
+    });
+    
+//print('Pv',Pv);
+
+// Calculate emmisivity
+var emmis = image.expression(
+    '-0.0251*Pv+0.998', {
+      'Pv' : Pv
+    });
+
+//print('emmisivity', emmis);
+
+// Calculate Land Surface Temperature
+var LST = image.expression(
+    '(BT/(1+(0.00115*BT/1.4388)*log(emmis)))', {
+      'BT' : BT,
+      'emmis' : emmis
+    });
+
+print('LST', LST);
+
+// Clip to the output image to the Philadelphia county boundaries.
+var clipped_lst = LST.clipToCollection(fc);    
+Map.addLayer(clipped_lst, {min: 15, max: 35, palette: ['green','yellow','red']},'LST');
+
+// meters.
+var Woodlands_ndvi = ndvi.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: Woodlands,
+  scale: 30
+});
+
+// Print the result (a Dictionary) to the console.
+print('Woodlands_ndvi',Woodlands_ndvi);
